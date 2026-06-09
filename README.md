@@ -17,6 +17,7 @@ One folder per script, named for the script. Each folder is self-contained:
 | Script | Description |
 |--------|-------------|
 | [pid-controller](pid-controller/) | Generic PID control loop for a Shelly output. |
+| [solar-diverter](solar-diverter/) | Ready-to-run PID solar-surplus diverter (Shelly EM Gen3). |
 
 ## Conventions
 
