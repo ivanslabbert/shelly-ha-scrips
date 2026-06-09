@@ -46,6 +46,93 @@ The output is clamped to `[outMin, outMax]`. Windup is prevented two ways:
   integration pauses while the output is saturated *and* the error would push
   it further past the limit, so the integral can't accumulate against a stop.
 
+## Example: solar surplus diverter (Shelly EM Gen3)
+
+Hardware: Shelly EM Gen3 with a 50 A CT on the **first CT input**, clamped on the
+grid feed. Goal: dump excess solar into a heating element so net grid power stays
+at zero instead of exporting.
+
+- **PV** — grid power from the first CT input, `em1:0` / `act_power`. This is in
+  **watts**, so `scale: 0.001` converts it to kW. Sign convention: import positive,
+  export negative (flip with `direction` if your CT reads the other way).
+- **SP** — `0`. Hold the grid at zero; surplus (negative PV) raises the error and
+  drives the heater up until import/export balances.
+- **CV** — written to a **virtual Number component** (`number:200`) as a 0–100 %
+  heater demand. Another device (the heater controller) reads that value over
+  RPC/HTTP/MQTT. Add the virtual `number:200` component on the device first.
+
+```js
+// CONFIG overrides for this use case:
+sp: { value: 0, source: null },                          // target 0 kW at the grid CT
+
+pv: {
+  source: { component: "em1:0", attr: "act_power" },     // first CT input, in watts
+  scale: 0.001,                                          // W -> kW
+  offset: 0.0,
+},
+
+cv: {
+  method: "Number.Set",                                  // write to a virtual Number...
+  id: 200,                                               // ...number:200, read by the heater
+  param: "value",
+  scale: 1.0,
+  offset: 0.0,
+},
+
+kp: 10.0,          // %/kW  — gentle; see the Sunsynk notes below
+ki: 2.0,           // %/kW/s
+kd: 0.0,           // leave at 0; power signals are noisy
+direction: 1,      // 1 if export reads negative; flip to -1 if it runs the wrong way
+
+outMin: 0,
+outMax: 100,       // heater demand, percent (100 % = full heater)
+sampleMs: 2000,    // slower than the inverter's own regulation loop
+```
+
+Notes:
+
+- **Check the sign first.** If enabling the loop makes the heater ramp *down* while
+  you're exporting, your CT polarity is reversed — set `direction: -1`.
+- To guarantee you never export (at the cost of importing a little), bias the
+  setpoint slightly positive, e.g. `sp.value = 0.1` (≈100 W of import headroom).
+- `kd: 0` — power measurements are noisy; a derivative term would amplify that.
+- If the heater only accepts on/off rather than a 0–100 % level, a raw PID doesn't
+  map cleanly — you'd want time-proportioning (PWM-style duty cycling) on top.
+
+### Tuning with a Sunsynk Lynx 6 kW (and a 6 kW heater)
+
+This setup runs the **inverter in export-to-grid mode**, so the Sunsynk is *not*
+curtailing surplus to hold the grid at zero. That's the clean, stable arrangement:
+real surplus shows up as genuine export (negative PV), and this loop simply soaks it
+into the heater to bring the grid back toward zero — no two controllers fighting over
+the same signal. The remaining tuning concerns are about the heater/inverter sizing
+and measurement noise:
+
+- **The heater (6 kW) equals the inverter rating, so a big proportional step can
+  demand more load than the inverter can ramp instantly** → a brief grid import →
+  the loop backs off → oscillation. Hence the gentle `kp: 10` and modest `ki: 2`:
+  let the integral walk the heater up and settle. Raise gains only if it tracks too
+  slowly, and only a little at a time.
+- **Keep the loop a touch slower than the inverter's transient** (`sampleMs: 2000`,
+  or 3000) so the heater rides the average surplus rather than chasing every PV/MPPT
+  wobble.
+- **Reserve headroom for house loads.** With weak sun, a 6 kW heater plus household
+  demand can exceed available PV and pull from the grid. The loop self-limits
+  (import → negative error → back off), but if you want a hard margin, cap `outMax`
+  (e.g. `80` ≈ 4.8 kW) so the heater can never claim the inverter's full output.
+- **No battery (this setup).** Controlling on *grid export* is the right choice
+  regardless of a battery — it's the most downstream measurement, so the loop just
+  soaks whatever would otherwise be exported. The only practical difference is that
+  without a battery to buffer them, PV transients (passing clouds) hit grid export
+  directly, so the heater is the sole fast sink. The gentle gains plus `sampleMs:
+  2000` are a deliberate balance: responsive enough to follow real surplus swings,
+  slow enough not to chase momentary noise.
+
+> If you ever switch the inverter to **zero-export**, revisit this: the inverter
+> would then curtail surplus to hold the grid at 0, the loop would see no error, and
+> the heater would never ramp. Export-enabled is what gives the diverter a signal to
+> act on.
+
 ## Implementation notes
 
 - Derivative is taken **on the measurement** (PV), not the error, to avoid a
